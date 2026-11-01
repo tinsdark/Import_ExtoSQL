@@ -356,6 +356,15 @@ def api_import():
         consts = {k: str(v) for k, v in (d.get("constants") or {}).items()
                   if str(v) != "" and k in cols_by_name and k not in mapping
                   and (ident_on or not cols_by_name[k]["identity"])}
+        # Cột NOT NULL không map, không nhập: chuỗi -> '', số/bit -> 0 (kiểu Cyber hay dùng). Ngày thì vẫn bắt buộc.
+        for c in STATE["cols"]:
+            n = c["name"]
+            if n in mapping or n in consts or c["nullable"] or c["has_default"] or c["identity"]:
+                continue
+            if c["type"] in CHAR_T:
+                consts[n] = ""
+            elif c["type"] in INT_T | DEC_T | FLT_T | {"bit"}:
+                consts[n] = "0"
         missing = [c["name"] for c in STATE["cols"]
                    if c["name"] not in mapping and c["name"] not in consts and not (c["nullable"] or c["has_default"] or c["identity"])]
         if missing:

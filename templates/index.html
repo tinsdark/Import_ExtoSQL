@@ -146,7 +146,7 @@ async function loadColumns() {
   tableCols = j.columns;
   const opts = '<option value="">(bỏ qua)</option>' + excelCols.map((c,i) => `<option value="${i}">${esc(c)}</option>`).join('');
   $('map').tBodies[0].innerHTML = tableCols.map((c,k) => {
-    const req = !c.nullable && !c.has_default && !c.identity;
+    const req = !c.nullable && !c.has_default && !c.identity && !/char|text|int|numeric|decimal|money|float|real|bit/.test(c.type);
     const len = c.max_len > 0 && /char/.test(c.type) ? `(${c.max_len})` : c.max_len === -1 ? '(max)' : /^(decimal|numeric)$/.test(c.type) ? `(${c.precision},${c.scale})` : '';
     return `<tr><td>${esc(c.name)}${req?'<span class="tag req">bắt buộc</span>':''}${c.identity?'<span class="tag id">identity</span>':''}</td>
       <td><small>${c.type}${len}</small></td>
