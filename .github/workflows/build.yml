@@ -1,0 +1,21 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: pyinstaller --onefile --name ImportExcelSQL --add-data "templates;templates" app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ImportExcelSQL
+          path: dist/ImportExcelSQL.exe
