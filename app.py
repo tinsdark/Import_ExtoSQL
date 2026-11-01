@@ -160,8 +160,11 @@ def make_converter(col):
     return conv
 
 
-def build_rows(df, mapping, cols_by_name, header_row):
-    """Convert toàn bộ data. Trả (rows, errors). errors = [{row, col, msg}]."""
+def build_rows(df, mapping, cols_by_name, header_row, consts=None):
+    """Convert toàn bộ data. Trả (rows, errors). errors = [{row, col, msg}].
+    consts: {cột: giá trị cố định} gắn vào mọi dòng (cho cột không có trong Excel)."""
+    consts = consts or {}
+    const_vals = tuple(make_converter(cols_by_name[n])(v) for n, v in consts.items())
     names = list(mapping.keys())
     convs = [make_converter(cols_by_name[n]) for n in names]
     idxs = [mapping[n] for n in names]
@@ -180,7 +183,7 @@ def build_rows(df, mapping, cols_by_name, header_row):
                     errors.append({"row": i + header_row + 1, "col": n, "msg": msg})
                 v = None
             out.append(v)
-        rows.append(tuple(out))
+        rows.append(tuple(out) + const_vals)
     return rows, errors
 
 
@@ -350,20 +353,26 @@ def api_import():
                    and (ident_on or not cols_by_name[k]["identity"])}  # mặc định bỏ cột identity
         if not mapping:
             return err("Chưa map cột nào")
+        consts = {k: str(v) for k, v in (d.get("constants") or {}).items()
+                  if str(v) != "" and k in cols_by_name and k not in mapping
+                  and (ident_on or not cols_by_name[k]["identity"])}
         missing = [c["name"] for c in STATE["cols"]
-                   if c["name"] not in mapping and not (c["nullable"] or c["has_default"] or c["identity"])]
+                   if c["name"] not in mapping and c["name"] not in consts and not (c["nullable"] or c["has_default"] or c["identity"])]
         if missing:
             return err("Cột bắt buộc (NOT NULL, không default) chưa map: " + ", ".join(missing))
-        ident_on = ident_on and any(cols_by_name[k]["identity"] for k in mapping)
+        ident_on = ident_on and any(cols_by_name[k]["identity"] for k in list(mapping) + list(consts))
 
         df, hr = STATE["df"], STATE["header_row"]
-        rows, errors = build_rows(df, mapping, cols_by_name, hr)
+        try:
+            rows, errors = build_rows(df, mapping, cols_by_name, hr, consts)
+        except (ValueError, InvalidOperation) as e:
+            return err(f"Giá trị cố định sai kiểu: {e}")
         if errors:
             return err(f"Dữ liệu sai kiểu — chưa ghi gì (hiện tối đa {MAX_ERRORS} lỗi đầu)", errors=errors)
         if d.get("dry_run"):
             return jsonify({"ok": True, "dry_run": True, "rows": len(rows)})
 
-        names = list(mapping.keys())
+        names = list(mapping.keys()) + list(consts.keys())
         truncate, batch = bool(d.get("truncate")), 1000
         try:
             conn = connect(STATE["conn"]["database"], autocommit=False)

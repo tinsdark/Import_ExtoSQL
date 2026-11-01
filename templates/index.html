@@ -76,7 +76,7 @@
 
 <section class="card off" id="s4">
   <h2><span>4</span>Mapping cột</h2>
-  <div class="scroll"><table id="map"><thead><tr><th>Cột bảng đích</th><th>Kiểu</th><th>Cột Excel</th></tr></thead><tbody></tbody></table></div>
+  <div class="scroll"><table id="map"><thead><tr><th>Cột bảng đích</th><th>Kiểu</th><th>Cột Excel</th><th>Hoặc giá trị cố định</th></tr></thead><tbody></tbody></table></div>
   <div style="margin-top:12px">
     <label style="display:inline-block"><input type="checkbox" id="trunc">Xóa sạch bảng trước khi import (DELETE)</label><br>
     <label style="display:inline-block" id="idl"><input type="checkbox" id="idins">Ghi đè cột identity (IDENTITY_INSERT)</label>
@@ -150,9 +150,15 @@ async function loadColumns() {
     const len = c.max_len > 0 && /char/.test(c.type) ? `(${c.max_len})` : c.max_len === -1 ? '(max)' : /^(decimal|numeric)$/.test(c.type) ? `(${c.precision},${c.scale})` : '';
     return `<tr><td>${esc(c.name)}${req?'<span class="tag req">bắt buộc</span>':''}${c.identity?'<span class="tag id">identity</span>':''}</td>
       <td><small>${c.type}${len}</small></td>
-      <td><select data-col="${esc(c.name)}">${opts}</select></td></tr>`;
+      <td><select data-col="${esc(c.name)}">${opts}</select></td>
+      <td><input data-const="${esc(c.name)}" placeholder="vd: 01" ${c.identity?'disabled':''}></td></tr>`;
   }).join('');
-  document.querySelectorAll('#map select').forEach((s,k) => { const g = tableCols[k].suggest; if (g != null && !(tableCols[k].identity)) s.value = g; });
+  document.querySelectorAll('#map select').forEach((s,k) => {
+    const g = tableCols[k].suggest; if (g != null && !(tableCols[k].identity)) s.value = g;
+    const inp = s.closest('tr').querySelector('input');
+    const sync = () => { inp.disabled = s.value !== '' || tableCols[k].identity; if (inp.disabled) inp.value = ''; };
+    s.onchange = sync; sync();
+  });
   $('idl').style.display = tableCols.some(c => c.identity) ? '' : 'none';
   show('m4', true, ''); on('s4', true);
 }
@@ -160,7 +166,9 @@ async function loadColumns() {
 function payload(dry) {
   const mapping = {};
   document.querySelectorAll('#map select').forEach(s => { if (s.value !== '') mapping[s.dataset.col] = s.value; });
-  return {mapping, truncate:$('trunc').checked, identity_insert:$('idins').checked, dry_run:dry};
+  const constants = {};
+  document.querySelectorAll('#map input[data-const]').forEach(i => { if (i.value !== '') constants[i.dataset.const] = i.value; });
+  return {mapping, constants, truncate:$('trunc').checked, identity_insert:$('idins').checked, dry_run:dry};
 }
 async function run(dry) {
   if (!dry && $('trunc').checked && !confirm('Sẽ XÓA SẠCH bảng ' + $('table').value + ' trước khi import. Chắc chưa?')) return;
