@@ -238,6 +238,65 @@ def locate_bad_row(schema, table, names, rows, truncate, ident_on, header_row):
 
 
 # ----------------------------------------------------------------------------
+# Update + Insert / Chỉ insert dòng mới (qua bảng tạm #stg)
+# ----------------------------------------------------------------------------
+def norm_key(v):
+    """Chuẩn hóa key để bắt trùng giống SQL (không phân biệt hoa thường, bỏ space cuối)."""
+    return v.rstrip().casefold() if isinstance(v, str) else v
+
+
+def check_keys(rows, names, keys, header_row):
+    """Key để trống hoặc trùng nhau trong file Excel -> list lỗi kèm số dòng Excel."""
+    ix = [names.index(k) for k in keys]
+    seen, errs = {}, []
+    for i, r in enumerate(rows):
+        vals = [r[j] for j in ix]
+        row = i + header_row + 1
+        if any(v is None or v == "" for v in vals):
+            msg = "Key để trống"
+        else:
+            nk = tuple(norm_key(v) for v in vals)
+            if nk not in seen:
+                seen[nk] = row
+                continue
+            msg = f"Key trùng với dòng Excel {seen[nk]}"
+        if len(errs) < MAX_ERRORS:
+            errs.append({"row": row, "col": ", ".join(keys), "msg": msg})
+    return errs
+
+
+def run_merge(conn, schema, table, names, rows, keys, upd_cols, batch, fast, dry):
+    """Đẩy data vào #stg, UPDATE dòng trùng key (nếu upd_cols), INSERT dòng chưa có key.
+    Trả (số dòng insert, số dòng key đã tồn tại). dry=True -> rollback, không ghi."""
+    cur = conn.cursor()
+    cur.fast_executemany = fast
+    full = f"[{schema}].[{table}]"
+    cl = ", ".join(f"[{n}]" for n in names)
+    sl = ", ".join(f"s.[{n}]" for n in names)
+    on = " AND ".join(f"t.[{k}] = s.[{k}]" for k in keys)
+    try:
+        cur.execute(f"SELECT TOP 0 {cl} INTO #stg FROM {full}")
+        sql = insert_sql(schema, table, names).replace(full, "#stg")
+        for i in range(0, len(rows), batch):
+            cur.executemany(sql, rows[i:i + batch])
+        n_exist = cur.execute(
+            f"SELECT COUNT(*) FROM #stg s WHERE EXISTS (SELECT 1 FROM {full} t WHERE {on})").fetchone()[0]
+        if upd_cols:
+            sets = ", ".join(f"t.[{c}] = s.[{c}]" for c in upd_cols)
+            cur.execute(f"UPDATE t SET {sets} FROM {full} t JOIN #stg s ON {on}")
+        cur.execute(f"INSERT INTO {full} ({cl}) SELECT {sl} FROM #stg s "
+                    f"WHERE NOT EXISTS (SELECT 1 FROM {full} t WHERE {on})")
+        if dry:
+            conn.rollback()
+        else:
+            conn.commit()
+        return len(rows) - n_exist, n_exist
+    except Exception:
+        conn.rollback()
+        raise
+
+
+# ----------------------------------------------------------------------------
 # Excel
 # ----------------------------------------------------------------------------
 def load_df(sheet, header_row):
@@ -356,6 +415,7 @@ def api_import():
         consts = {k: str(v) for k, v in (d.get("constants") or {}).items()
                   if str(v) != "" and k in cols_by_name and k not in mapping
                   and (ident_on or not cols_by_name[k]["identity"])}
+        user_consts = set(consts)
         # Cột NOT NULL không map, không nhập: chuỗi -> '', số/bit -> 0 (kiểu Cyber hay dùng). Ngày thì vẫn bắt buộc.
         for c in STATE["cols"]:
             n = c["name"]
@@ -378,10 +438,41 @@ def api_import():
             return err(f"Giá trị cố định sai kiểu: {e}")
         if errors:
             return err(f"Dữ liệu sai kiểu — chưa ghi gì (hiện tối đa {MAX_ERRORS} lỗi đầu)", errors=errors)
-        if d.get("dry_run"):
-            return jsonify({"ok": True, "dry_run": True, "rows": len(rows)})
-
         names = list(mapping.keys()) + list(consts.keys())
+        dry = bool(d.get("dry_run"))
+        mode = d.get("mode", "insert")
+        if mode in ("upsert", "insert_new"):
+            keys = [k for k in (d.get("keys") or []) if k in names]
+            if not keys:
+                return err("Chưa chọn cột Key")
+            bad_k = [k for k in keys if k not in mapping and k not in user_consts]
+            if bad_k:
+                return err("Cột Key phải map từ Excel hoặc nhập giá trị cố định: " + ", ".join(bad_k))
+            if ident_on or d.get("truncate"):
+                return err("Chế độ này không dùng chung với 'Xóa sạch bảng' / 'IDENTITY_INSERT'")
+            kerrs = check_keys(rows, names, keys, hr)
+            if kerrs:
+                return err(f"Key sai — chưa ghi gì (hiện tối đa {MAX_ERRORS} lỗi đầu)", errors=kerrs)
+            ow = d.get("overwrite") or {}
+            upd = [n for n in names if n not in keys and ow.get(n, True)] if mode == "upsert" else []
+            try:
+                conn = connect(STATE["conn"]["database"], autocommit=False)
+            except Exception as e:
+                return err(f"Không kết nối được: {e}")
+            try:
+                try:
+                    n_ins, n_exist = run_merge(conn, schema, table, names, rows, keys, upd, 1000, True, dry)
+                except Exception:
+                    n_ins, n_exist = run_merge(conn, schema, table, names, rows, keys, upd, 1000, False, dry)
+            except Exception as e:
+                return err(f"Lỗi — đã ROLLBACK, bảng không đổi. {e}")
+            finally:
+                conn.close()
+            return jsonify({"ok": True, "dry_run": dry, "mode": mode, "rows": len(rows),
+                            "inserted": n_ins, "existing": n_exist,
+                            "updated": n_exist if upd else 0})
+        if dry:
+            return jsonify({"ok": True, "dry_run": True, "mode": "insert", "rows": len(rows)})
         truncate, batch = bool(d.get("truncate")), 1000
         try:
             conn = connect(STATE["conn"]["database"], autocommit=False)

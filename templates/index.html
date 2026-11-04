@@ -36,6 +36,9 @@
   .scroll { overflow-x:auto }
   .prev td, .prev th { font-size:12px; white-space:nowrap }
   small { color:var(--mut) }
+  #map[data-mode=insert] .k, #map[data-mode=insert] .o, #map[data-mode=insert_new] .o { display:none }
+  th .lnk { cursor:pointer; color:var(--pri); text-decoration:underline; margin-left:6px; font-weight:normal }
+  td.k, td.o, th.k, th.o { text-align:center }
 </style>
 </head>
 <body>
@@ -76,7 +79,17 @@
 
 <section class="card off" id="s4">
   <h2><span>4</span>Mapping cột</h2>
-  <div class="scroll"><table id="map"><thead><tr><th>Cột bảng đích</th><th>Kiểu</th><th>Cột Excel</th><th>Hoặc giá trị cố định</th></tr></thead><tbody></tbody></table></div>
+  <div style="margin-bottom:12px;max-width:420px">
+    <label>Chế độ</label>
+    <select id="mode">
+      <option value="insert">Insert thường (có thể trùng dữ liệu)</option>
+      <option value="upsert">Update + Insert theo Key</option>
+      <option value="insert_new">Chỉ insert dòng chưa có Key (trùng thì bỏ qua)</option>
+    </select>
+  </div>
+  <div class="scroll"><table id="map" data-mode="insert"><thead><tr><th>Cột bảng đích</th><th>Kiểu</th><th>Cột Excel</th><th>Hoặc giá trị cố định</th>
+    <th class="k">Key</th>
+    <th class="o">Ghi đè khi update<br><span class="lnk" id="owAll">Bật tất cả</span><span class="lnk" id="owNone">Tắt tất cả</span></th></tr></thead><tbody></tbody></table></div>
   <div style="margin-top:12px">
     <label style="display:inline-block"><input type="checkbox" id="trunc">Xóa sạch bảng trước khi import (DELETE)</label><br>
     <label style="display:inline-block" id="idl"><input type="checkbox" id="idins">Ghi đè cột identity (IDENTITY_INSERT)</label>
@@ -151,30 +164,54 @@ async function loadColumns() {
     return `<tr><td>${esc(c.name)}${req?'<span class="tag req">bắt buộc</span>':''}${c.identity?'<span class="tag id">identity</span>':''}</td>
       <td><small>${c.type}${len}</small></td>
       <td><select data-col="${esc(c.name)}">${opts}</select></td>
-      <td><input data-const="${esc(c.name)}" placeholder="vd: 01" ${c.identity?'disabled':''}></td></tr>`;
+      <td><input data-const="${esc(c.name)}" placeholder="vd: 01" ${c.identity?'disabled':''}></td>
+      <td class="k"><input type="checkbox" data-key="${esc(c.name)}" ${c.identity?'disabled':''}></td>
+      <td class="o"><input type="checkbox" data-ow="${esc(c.name)}" checked ${c.identity?'disabled':''}></td></tr>`;
   }).join('');
   document.querySelectorAll('#map select').forEach((s,k) => {
     const g = tableCols[k].suggest; if (g != null && !(tableCols[k].identity)) s.value = g;
     const inp = s.closest('tr').querySelector('input');
     const sync = () => { inp.disabled = s.value !== '' || tableCols[k].identity; if (inp.disabled) inp.value = ''; };
     s.onchange = sync; sync();
+    const kb = s.closest('tr').querySelector('[data-key]'), ob = s.closest('tr').querySelector('[data-ow]');
+    kb.onchange = () => { ob.disabled = kb.checked || tableCols[k].identity; if (kb.checked) ob.checked = false; else ob.checked = true; };
   });
   $('idl').style.display = tableCols.some(c => c.identity) ? '' : 'none';
   show('m4', true, ''); on('s4', true);
 }
+
+function setMode() {
+  const m = $('mode').value;
+  $('map').dataset.mode = m;
+  $('trunc').disabled = $('idins').disabled = m !== 'insert';
+  if (m !== 'insert') $('trunc').checked = $('idins').checked = false;
+}
+$('mode').onchange = setMode;
+const setAllOw = v => document.querySelectorAll('[data-ow]').forEach(b => { if (!b.disabled) b.checked = v; });
+$('owAll').onclick = () => setAllOw(true);
+$('owNone').onclick = () => setAllOw(false);
 
 function payload(dry) {
   const mapping = {};
   document.querySelectorAll('#map select').forEach(s => { if (s.value !== '') mapping[s.dataset.col] = s.value; });
   const constants = {};
   document.querySelectorAll('#map input[data-const]').forEach(i => { if (i.value !== '') constants[i.dataset.const] = i.value; });
-  return {mapping, constants, truncate:$('trunc').checked, identity_insert:$('idins').checked, dry_run:dry};
+  const keys = [...document.querySelectorAll('[data-key]:checked')].map(i => i.dataset.key);
+  const overwrite = {};
+  document.querySelectorAll('[data-ow]').forEach(i => overwrite[i.dataset.ow] = i.checked);
+  return {mode:$('mode').value, keys, overwrite, mapping, constants, truncate:$('trunc').checked, identity_insert:$('idins').checked, dry_run:dry};
 }
 async function run(dry) {
   if (!dry && $('trunc').checked && !confirm('Sẽ XÓA SẠCH bảng ' + $('table').value + ' trước khi import. Chắc chưa?')) return;
   $('btnImp').disabled = $('btnCheck').disabled = true; show('m4', true, 'Đang chạy...');
   const j = await post('/api/import', payload(dry));
   $('btnImp').disabled = $('btnCheck').disabled = false;
+  if (j.ok && j.mode && j.mode !== 'insert') {
+    const parts = [`${j.inserted} dòng insert mới`];
+    if (j.mode === 'upsert') parts.push(`${j.updated} dòng update`);
+    else parts.push(`${j.existing} dòng đã có Key → bỏ qua`);
+    return show('m4', true, (dry ? `Kiểm tra OK (chưa ghi gì) — ${j.rows} dòng Excel: ` : `Xong — ${j.rows} dòng Excel: `) + parts.join(', ') + '.');
+  }
   if (j.ok) return show('m4', true, dry ? `Dữ liệu hợp lệ — ${j.rows} dòng sẵn sàng import.` : `Đã import ${j.rows} dòng vào ${$('table').value}.`);
   let t = j.error;
   if (j.errors) t += '\n' + j.errors.map(e => `• Dòng Excel ${e.row}, cột ${e.col}: ${e.msg}`).join('\n');
