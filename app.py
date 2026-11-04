@@ -10,6 +10,7 @@ Chạy:  python app.py   rồi mở http://127.0.0.1:5000
 """
 
 import io
+import locale
 import threading
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -58,8 +59,11 @@ def connect(database=None, autocommit=True):
     else:
         parts.append("Trusted_Connection=yes")
     conn = pyodbc.connect(";".join(parts), timeout=15, autocommit=autocommit)
-    conn.setdecoding(pyodbc.SQL_CHAR, encoding="utf-8")
-    conn.setdecoding(pyodbc.SQL_WCHAR, encoding="utf-8")
+    # Driver trả dữ liệu char theo code page ANSI của Windows (không phải utf-8),
+    # còn nchar/nvarchar (tiếng Việt) là utf-16le.
+    conn.setdecoding(pyodbc.SQL_CHAR, encoding=locale.getpreferredencoding(False))
+    conn.setdecoding(pyodbc.SQL_WCHAR, encoding="utf-16le")
+    conn.setencoding(encoding="utf-16le")
     return conn
 
 
